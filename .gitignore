@@ -3,6 +3,8 @@
 ckpts/
 logs/
 results/
+runs/
+data/
 *.mp4
 
 # Byte-compiled / optimized / DLL files

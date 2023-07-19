@@ -7,22 +7,29 @@ def get_opts():
     parser.add_argument('--root_dir', type=str, required=True,
                         help='root directory of dataset')
     parser.add_argument('--dataset_name', type=str, default='nsvf',
-                        choices=['nerf', 'nsvf', 'colmap', 'nerfpp', 'rtmv'],
+                        choices=['nerf', 'nsvf', 'colmap', 'nerfpp', 'rtmv', 'replica'],
                         help='which dataset to train/test')
     parser.add_argument('--split', type=str, default='train',
                         choices=['train', 'trainval', 'trainvaltest'],
                         help='use which split to train')
     parser.add_argument('--downsample', type=float, default=1.0,
                         help='downsample factor (<=1.0) for the images')
+    parser.add_argument('--use_depth', action='store_true', default=False,
+                        help='whether to train with depth map')
 
     # model parameters
     parser.add_argument('--scale', type=float, default=0.5,
-                        help='scene scale (whole scene must lie in [-scale, scale]^3')
+                        help='scene scale (whole scene must lie in [-scale, scale]^3, Replica is 0.75')
     parser.add_argument('--use_exposure', action='store_true', default=False,
                         help='whether to train in HDR-NeRF setting')
 
     # loss parameters
-    parser.add_argument('--distortion_loss_w', type=float, default=0,
+    parser.add_argument('--opacity_loss_w', type=float, default=1e-3,
+                        help='''weight of opacity loss (see losses.py),
+                        0 to disable (default), to enable,
+                        a good value is 1e-3 for real scene and 1e-2 for synthetic scene
+                        ''')
+    parser.add_argument('--distortion_loss_w', type=float, default=1e-3,
                         help='''weight of distortion loss (see losses.py),
                         0 to disable (default), to enable,
                         a good value is 1e-3 for real scene and 1e-2 for synthetic scene

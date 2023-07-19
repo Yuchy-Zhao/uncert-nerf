@@ -58,7 +58,8 @@ class NeRFSystem(LightningModule):
         self.warmup_steps = 256
         self.update_interval = 16
 
-        self.loss = NeRFLoss(lambda_distortion=self.hparams.distortion_loss_w)
+        self.loss = NeRFLoss(lambda_opacity=self.hparams.opacity_loss_w, 
+                             lambda_distortion=self.hparams.distortion_loss_w)
         self.train_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1)
@@ -102,7 +103,8 @@ class NeRFSystem(LightningModule):
     def setup(self, stage):
         dataset = dataset_dict[self.hparams.dataset_name]
         kwargs = {'root_dir': self.hparams.root_dir,
-                  'downsample': self.hparams.downsample}
+                  'downsample': self.hparams.downsample,
+                  'use_depth': self.hparams.use_depth}
         self.train_dataset = dataset(split=self.hparams.split, **kwargs)
         self.train_dataset.batch_size = self.hparams.batch_size
         self.train_dataset.ray_sampling_strategy = self.hparams.ray_sampling_strategy
@@ -163,7 +165,8 @@ class NeRFSystem(LightningModule):
                                            erode=self.hparams.dataset_name=='colmap')
 
         results = self(batch, split='train')
-        loss_d = self.loss(results, batch)
+        kwargs = {'use_depth': self.hparams.use_depth}
+        loss_d = self.loss(results, batch, **kwargs)
         if self.hparams.use_exposure:
             zero_radiance = torch.zeros(1, 3, device=self.device)
             unit_exposure_rgb = self.model.log_radiance_to_rgb(zero_radiance,
@@ -176,6 +179,12 @@ class NeRFSystem(LightningModule):
             self.train_psnr(results['rgb'], batch['rgb'])
         self.log('lr', self.net_opt.param_groups[0]['lr'])
         self.log('train/loss', loss)
+        self.log('train/loss_rgb', loss_d['rgb'].mean())
+        self.log('train/loss_opacity', loss_d['opacity'].mean())
+        if self.hparams.use_depth:
+            self.log('train/loss_depth', loss_d['depth'].mean())
+        if self.hparams.distortion_loss_w > 0:
+            self.log('train/loss_distortion', loss_d['distortion'].mean())
         # ray marching samples per ray (occupied space on the ray)
         self.log('train/rm_s', results['rm_samples']/len(batch['rgb']), True)
         # volume rendering samples per ray (stops marching when transmittance drops below 1e-4)
@@ -187,7 +196,7 @@ class NeRFSystem(LightningModule):
     def on_validation_start(self):
         torch.cuda.empty_cache()
         if not self.hparams.no_save_test:
-            self.val_dir = f'results/{self.hparams.dataset_name}/{self.hparams.exp_name}'
+            self.val_dir = f'runs/results/{self.hparams.dataset_name}/{self.hparams.exp_name}'
             os.makedirs(self.val_dir, exist_ok=True)
 
     def validation_step(self, batch, batch_nb):
@@ -216,9 +225,13 @@ class NeRFSystem(LightningModule):
             idx = batch['img_idxs']
             rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_pred = (rgb_pred*255).astype(np.uint8)
+            rgb_gt = rearrange(batch['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
+            rgb_gt = (rgb_gt*255).astype(np.uint8)
             depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
-            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}.png'), rgb_pred)
+            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_c.png'), rgb_pred)
+            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_g.png'), rgb_gt)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+
 
         return logs
 
@@ -249,7 +262,7 @@ if __name__ == '__main__':
         raise ValueError('You need to provide a @ckpt_path for validation!')
     system = NeRFSystem(hparams)
 
-    ckpt_cb = ModelCheckpoint(dirpath=f'ckpts/{hparams.dataset_name}/{hparams.exp_name}',
+    ckpt_cb = ModelCheckpoint(dirpath=f'runs/ckpts/{hparams.dataset_name}/{hparams.exp_name}',
                               filename='{epoch:d}',
                               save_weights_only=True,
                               every_n_epochs=hparams.num_epochs,
@@ -257,7 +270,7 @@ if __name__ == '__main__':
                               save_top_k=-1)
     callbacks = [ckpt_cb, TQDMProgressBar(refresh_rate=1)]
 
-    logger = TensorBoardLogger(save_dir=f"logs/{hparams.dataset_name}",
+    logger = TensorBoardLogger(save_dir=f"runs/logs/{hparams.dataset_name}",
                                name=hparams.exp_name,
                                default_hp_metric=False)
 
@@ -277,17 +290,18 @@ if __name__ == '__main__':
 
     if not hparams.val_only: # save slimmed ckpt for the last epoch
         ckpt_ = \
-            slim_ckpt(f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}.ckpt',
+            slim_ckpt(f'runs/ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}.ckpt',
                       save_poses=hparams.optimize_ext)
-        torch.save(ckpt_, f'ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
+        torch.save(ckpt_, f'runs/ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
 
-    if (not hparams.no_save_test) and \
-       hparams.dataset_name=='nsvf' and \
-       'Synthetic' in hparams.root_dir: # save video
+    if not hparams.no_save_test:
         imgs = sorted(glob.glob(os.path.join(system.val_dir, '*.png')))
         imageio.mimsave(os.path.join(system.val_dir, 'rgb.mp4'),
-                        [imageio.imread(img) for img in imgs[::2]],
-                        fps=30, macro_block_size=1)
+                        [imageio.imread(img) for img in imgs[::3]],
+                        fps=10, macro_block_size=1)
         imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
-                        [imageio.imread(img) for img in imgs[1::2]],
-                        fps=30, macro_block_size=1)
+                        [imageio.imread(img) for img in imgs[1::3]],
+                        fps=10, macro_block_size=1)
+        imageio.mimsave(os.path.join(system.val_dir, 'GT.mp4'),
+                        [imageio.imread(img) for img in imgs[2::3]],
+                        fps=10, macro_block_size=1)

@@ -15,6 +15,8 @@ class NeRFPPDataset(BaseDataset):
     def __init__(self, root_dir, split='train', downsample=1.0, **kwargs):
         super().__init__(root_dir, split, downsample)
 
+        self.kwargs = kwargs
+
         self.read_intrinsics()
 
         if kwargs.get('read_meta', True):

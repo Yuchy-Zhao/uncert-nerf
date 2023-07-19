@@ -1,5 +1,14 @@
 import numpy as np
 import re
+import cv2
+from einops import rearrange
+import imageio
+
+def read_depth(depth_path, img_wh):
+    depth = imageio.imread(depth_path).astype(np.float32)
+    depth = cv2.resize(depth, img_wh)
+    depth = rearrange(depth, 'h w -> (h w)')
+    return depth
 
 
 def read_pfm(path):

@@ -31,6 +31,9 @@ class BaseDataset(Dataset):
             rays = self.rays[img_idxs, pix_idxs]
             sample = {'img_idxs': img_idxs, 'pix_idxs': pix_idxs,
                       'rgb': rays[:, :3]}
+            if self.kwargs.get('use_depth', True):
+                depths = self.depths[img_idxs, pix_idxs]
+                sample['depth'] = depths
             if self.rays.shape[-1] == 4: # HDR-NeRF data
                 sample['exposure'] = rays[:, 3:]
         else:
@@ -38,6 +41,9 @@ class BaseDataset(Dataset):
             if len(self.rays)>0: # if ground truth available
                 rays = self.rays[idx]
                 sample['rgb'] = rays[:, :3]
+                if self.kwargs.get('use_depth', True):
+                    depths = self.depths[idx]
+                    sample['depth'] = depths
                 if rays.shape[1] == 4: # HDR-NeRF data
                     sample['exposure'] = rays[0, 3] # same exposure for all rays
 

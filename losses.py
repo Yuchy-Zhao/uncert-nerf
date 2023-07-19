@@ -48,8 +48,12 @@ class NeRFLoss(nn.Module):
         d = {}
         d['rgb'] = (results['rgb']-target['rgb'])**2
 
+        if kwargs.get('use_depth', True):
+            # d['depth'] = (results['depth']-target['depth'])**2
+            d['depth'] = torch.abs(results['depth']-target['depth'])
+
         o = results['opacity']+1e-10
-        # encourage opacity to be either 0 or 1 to avoid floater
+        # # encourage opacity to be either 0 or 1 to avoid floater
         d['opacity'] = self.lambda_opacity*(-o*torch.log(o))
 
         if self.lambda_distortion > 0:

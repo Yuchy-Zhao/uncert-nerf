@@ -109,6 +109,7 @@ std::vector<torch::Tensor> raymarching_test(
 std::vector<torch::Tensor> composite_train_fw(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor rays_a,
@@ -116,12 +117,13 @@ std::vector<torch::Tensor> composite_train_fw(
 ){
     CHECK_INPUT(sigmas);
     CHECK_INPUT(rgbs);
+    CHECK_INPUT(uncerts);
     CHECK_INPUT(deltas);
     CHECK_INPUT(ts);
     CHECK_INPUT(rays_a);
 
     return composite_train_fw_cu(
-                sigmas, rgbs, deltas, ts,
+                sigmas, rgbs, uncerts, deltas, ts,
                 rays_a, opacity_threshold);
 }
 
@@ -130,9 +132,11 @@ std::vector<torch::Tensor> composite_train_bw(
     const torch::Tensor dL_dopacity,
     const torch::Tensor dL_ddepth,
     const torch::Tensor dL_drgb,
+    const torch::Tensor dL_duncert,
     const torch::Tensor dL_dws,
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor ws,
     const torch::Tensor deltas,
     const torch::Tensor ts,
@@ -140,14 +144,17 @@ std::vector<torch::Tensor> composite_train_bw(
     const torch::Tensor opacity,
     const torch::Tensor depth,
     const torch::Tensor rgb,
+    const torch::Tensor uncert,
     const float opacity_threshold
 ){
     CHECK_INPUT(dL_dopacity);
     CHECK_INPUT(dL_ddepth);
     CHECK_INPUT(dL_drgb);
+    CHECK_INPUT(dL_duncert);
     CHECK_INPUT(dL_dws);
     CHECK_INPUT(sigmas);
     CHECK_INPUT(rgbs);
+    CHECK_INPUT(uncerts);
     CHECK_INPUT(ws);
     CHECK_INPUT(deltas);
     CHECK_INPUT(ts);
@@ -155,17 +162,19 @@ std::vector<torch::Tensor> composite_train_bw(
     CHECK_INPUT(opacity);
     CHECK_INPUT(depth);
     CHECK_INPUT(rgb);
+    CHECK_INPUT(uncert);
 
     return composite_train_bw_cu(
-                dL_dopacity, dL_ddepth, dL_drgb, dL_dws,
-                sigmas, rgbs, ws, deltas, ts, rays_a,
-                opacity, depth, rgb, opacity_threshold);
+                dL_dopacity, dL_ddepth, dL_drgb, dL_duncert, dL_dws,
+                sigmas, rgbs, uncerts, ws, deltas, ts, rays_a,
+                opacity, depth, rgb, uncert, opacity_threshold);
 }
 
 
 void composite_test_fw(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor hits_t,
@@ -174,10 +183,12 @@ void composite_test_fw(
     const torch::Tensor N_eff_samples,
     torch::Tensor opacity,
     torch::Tensor depth,
-    torch::Tensor rgb
+    torch::Tensor rgb,
+    torch::Tensor uncert
 ){
     CHECK_INPUT(sigmas);
     CHECK_INPUT(rgbs);
+    CHECK_INPUT(uncerts);
     CHECK_INPUT(deltas);
     CHECK_INPUT(ts);
     CHECK_INPUT(hits_t);
@@ -186,11 +197,12 @@ void composite_test_fw(
     CHECK_INPUT(opacity);
     CHECK_INPUT(depth);
     CHECK_INPUT(rgb);
+    CHECK_INPUT(uncert);
 
     composite_test_fw_cu(
-        sigmas, rgbs, deltas, ts, hits_t, alive_indices,
+        sigmas, rgbs, uncerts, deltas, ts, hits_t, alive_indices,
         T_threshold, N_eff_samples,
-        opacity, depth, rgb);
+        opacity, depth, rgb, uncert);
 }
 
 

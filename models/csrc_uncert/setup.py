@@ -12,15 +12,15 @@ sources = glob.glob('*.cpp')+glob.glob('*.cu')
 
 
 setup(
-    name='vren',
+    name='vren_uncert',
     version='2.0',
-    author='kwea123',
-    author_email='kwea123@gmail.com',
-    description='cuda volume rendering library',
-    long_description='cuda volume rendering library',
+    author='Yuchy',
+    author_email='zhaoyuchy@gmail.com',
+    description='cuda volume rendering library with uncertainty',
+    long_description='cuda volume rendering library with uncertainty',
     ext_modules=[
         CUDAExtension(
-            name='vren',
+            name='vren_uncert',
             sources=sources,
             include_dirs=include_dirs,
             extra_compile_args={'cxx': ['-O2'],

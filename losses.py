@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-import vren
+import vren_uncert
 
 
 class DistortionLoss(torch.autograd.Function):
@@ -22,7 +22,7 @@ class DistortionLoss(torch.autograd.Function):
     @staticmethod
     def forward(ctx, ws, deltas, ts, rays_a):
         loss, ws_inclusive_scan, wts_inclusive_scan = \
-            vren.distortion_loss_fw(ws, deltas, ts, rays_a)
+            vren_uncert.distortion_loss_fw(ws, deltas, ts, rays_a)
         ctx.save_for_backward(ws_inclusive_scan, wts_inclusive_scan,
                               ws, deltas, ts, rays_a)
         return loss
@@ -31,7 +31,7 @@ class DistortionLoss(torch.autograd.Function):
     def backward(ctx, dL_dloss):
         (ws_inclusive_scan, wts_inclusive_scan,
         ws, deltas, ts, rays_a) = ctx.saved_tensors
-        dL_dws = vren.distortion_loss_bw(dL_dloss, ws_inclusive_scan,
+        dL_dws = vren_uncert.distortion_loss_bw(dL_dloss, ws_inclusive_scan,
                                          wts_inclusive_scan,
                                          ws, deltas, ts, rays_a)
         return dL_dws, None, None, None
@@ -51,6 +51,12 @@ class NeRFLoss(nn.Module):
         if kwargs.get('use_depth', True):
             # d['depth'] = (results['depth']-target['depth'])**2
             d['depth'] = torch.abs(results['depth']-target['depth'])
+
+        if kwargs.get('use_uncertainty', True):
+            mask = (results['uncert'] == 0).detach()
+            d['uncert'] = ((results['rgb'][~mask]-target['rgb'][~mask])**2) / \
+                        (2*(results['uncert'][~mask]+1e-9).unsqueeze(-1)) + \
+                        torch.log(results['uncert'][~mask]+1e-9).unsqueeze(-1) / 2
 
         o = results['opacity']+1e-10
         # # encourage opacity to be either 0 or 1 to avoid floater

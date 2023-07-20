@@ -2,7 +2,7 @@ import torch
 from .custom_functions import \
     RayAABBIntersector, RayMarcher, VolumeRenderer
 from einops import rearrange
-import vren
+import vren_uncert
 
 MAX_SAMPLES = 1024
 NEAR_DISTANCE = 0.01
@@ -65,6 +65,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
     opacity = torch.zeros(N_rays, device=device)
     depth = torch.zeros(N_rays, device=device)
     rgb = torch.zeros(N_rays, 3, device=device)
+    uncert = torch.zeros(N_rays, device=device)
 
     samples = total_samples = 0
     alive_indices = torch.arange(N_rays, device=device)
@@ -81,7 +82,7 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
         samples += N_samples
 
         xyzs, dirs, deltas, ts, N_eff_samples = \
-            vren.raymarching_test(rays_o, rays_d, hits_t[:, 0], alive_indices,
+            vren_uncert.raymarching_test(rays_o, rays_d, hits_t[:, 0], alive_indices,
                                   model.density_bitfield, model.cascades,
                                   model.scale, exp_step_factor,
                                   model.grid_size, MAX_SAMPLES, N_samples)
@@ -93,20 +94,24 @@ def __render_rays_test(model, rays_o, rays_d, hits_t, **kwargs):
 
         sigmas = torch.zeros(len(xyzs), device=device)
         rgbs = torch.zeros(len(xyzs), 3, device=device)
-        sigmas[valid_mask], _rgbs = model(xyzs[valid_mask], dirs[valid_mask], **kwargs)
+        uncerts = torch.zeros(len(xyzs), device=device)
+        sigmas[valid_mask], _rgbs, _uncerts = model(xyzs[valid_mask], dirs[valid_mask], **kwargs)
         rgbs[valid_mask] = _rgbs.float()
+        uncerts[valid_mask] = _uncerts.float()
         sigmas = rearrange(sigmas, '(n1 n2) -> n1 n2', n2=N_samples)
         rgbs = rearrange(rgbs, '(n1 n2) c -> n1 n2 c', n2=N_samples)
+        uncerts = rearrange(uncerts, '(n1 n2) -> n1 n2', n2=N_samples)
 
-        vren.composite_test_fw(
-            sigmas, rgbs, deltas, ts,
+        vren_uncert.composite_test_fw(
+            sigmas, rgbs, uncerts, deltas, ts,
             hits_t[:, 0], alive_indices, kwargs.get('T_threshold', 1e-4),
-            N_eff_samples, opacity, depth, rgb)
+            N_eff_samples, opacity, depth, rgb, uncert)
         alive_indices = alive_indices[alive_indices>=0] # remove converged rays
 
     results['opacity'] = opacity
     results['depth'] = depth
     results['rgb'] = rgb
+    results['uncert'] = uncert
     results['total_samples'] = total_samples # total samples for all rays
 
     if exp_step_factor==0: # synthetic
@@ -142,11 +147,11 @@ def __render_rays_train(model, rays_o, rays_d, hits_t, **kwargs):
     for k, v in kwargs.items(): # supply additional inputs, repeated per ray
         if isinstance(v, torch.Tensor):
             kwargs[k] = torch.repeat_interleave(v[rays_a[:, 0]], rays_a[:, 2], 0)
-    sigmas, rgbs = model(xyzs, dirs, **kwargs)
+    sigmas, rgbs, uncerts = model(xyzs, dirs, **kwargs)
 
     (results['vr_samples'], results['opacity'],
-    results['depth'], results['rgb'], results['ws']) = \
-        VolumeRenderer.apply(sigmas, rgbs.contiguous(), results['deltas'], results['ts'],
+    results['depth'], results['rgb'], results['uncert'], results['ws']) = \
+        VolumeRenderer.apply(sigmas, rgbs.contiguous(), uncerts.contiguous(), results['deltas'], results['ts'],
                              rays_a, kwargs.get('T_threshold', 1e-4))
     results['rays_a'] = rays_a
 

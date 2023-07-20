@@ -7,6 +7,7 @@ template <typename scalar_t>
 __global__ void composite_train_fw_kernel(
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> sigmas,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgbs,
+    const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> uncerts,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> deltas,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> ts,
     const torch::PackedTensorAccessor64<int64_t, 2, torch::RestrictPtrTraits> rays_a,
@@ -15,6 +16,7 @@ __global__ void composite_train_fw_kernel(
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> opacity,
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> depth,
     torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgb,
+    torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> uncert,
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> ws
 ){
     const int n = blockIdx.x * blockDim.x + threadIdx.x;
@@ -33,6 +35,7 @@ __global__ void composite_train_fw_kernel(
         rgb[ray_idx][0] += w*rgbs[s][0];
         rgb[ray_idx][1] += w*rgbs[s][1];
         rgb[ray_idx][2] += w*rgbs[s][2];
+        uncert[ray_idx] += w*w*uncerts[s];
         depth[ray_idx] += w*ts[s];
         opacity[ray_idx] += w;
         ws[s] = w;
@@ -48,6 +51,7 @@ __global__ void composite_train_fw_kernel(
 std::vector<torch::Tensor> composite_train_fw_cu(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor rays_a,
@@ -58,6 +62,7 @@ std::vector<torch::Tensor> composite_train_fw_cu(
     auto opacity = torch::zeros({N_rays}, sigmas.options());
     auto depth = torch::zeros({N_rays}, sigmas.options());
     auto rgb = torch::zeros({N_rays, 3}, sigmas.options());
+    auto uncert = torch::zeros({N_rays}, sigmas.options());
     auto ws = torch::zeros({N}, sigmas.options());
     auto total_samples = torch::zeros({N_rays}, torch::dtype(torch::kLong).device(sigmas.device()));
 
@@ -68,6 +73,7 @@ std::vector<torch::Tensor> composite_train_fw_cu(
         composite_train_fw_kernel<scalar_t><<<blocks, threads>>>(
             sigmas.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rgbs.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            uncerts.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             deltas.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             ts.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rays_a.packed_accessor64<int64_t, 2, torch::RestrictPtrTraits>(),
@@ -76,11 +82,12 @@ std::vector<torch::Tensor> composite_train_fw_cu(
             opacity.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             depth.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rgb.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            uncert.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             ws.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>()
         );
     }));
 
-    return {total_samples, opacity, depth, rgb, ws};
+    return {total_samples, opacity, depth, rgb, uncert, ws};
 }
 
 
@@ -89,19 +96,23 @@ __global__ void composite_train_bw_kernel(
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_dopacity,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_ddepth,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> dL_drgb,
+    const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_duncert,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_dws,
     scalar_t* __restrict__ dL_dws_times_ws,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> sigmas,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgbs,
+    const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> uncerts,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> deltas,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> ts,
     const torch::PackedTensorAccessor64<int64_t, 2, torch::RestrictPtrTraits> rays_a,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> opacity,
     const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> depth,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgb,
+    const torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> uncert,
     const scalar_t T_threshold,
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_dsigmas,
-    torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> dL_drgbs
+    torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> dL_drgbs,
+    torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> dL_duncerts
 ){
     const int n = blockIdx.x * blockDim.x + threadIdx.x;
     if (n >= opacity.size(0)) return;
@@ -111,8 +122,10 @@ __global__ void composite_train_bw_kernel(
     // front to back compositing
     int samples = 0;
     scalar_t R = rgb[ray_idx][0], G = rgb[ray_idx][1], B = rgb[ray_idx][2];
+    scalar_t U = uncert[ray_idx];
     scalar_t O = opacity[ray_idx], D = depth[ray_idx];
     scalar_t T = 1.0f, r = 0.0f, g = 0.0f, b = 0.0f, d = 0.0f;
+    scalar_t u = 0.0f;
 
     // compute prefix sum of dL_dws * ws
     // [a0, a1, a2, a3, ...] -> [a0, a0+a1, a0+a1+a2, a0+a1+a2+a3, ...]
@@ -128,7 +141,9 @@ __global__ void composite_train_bw_kernel(
         const scalar_t w = a * T;
 
         r += w*rgbs[s][0]; g += w*rgbs[s][1]; b += w*rgbs[s][2];
+        u += w*w*uncerts[s];
         d += w*ts[s];
+        scalar_t T_p = T;
         T *= 1.0f-a;
 
         // compute gradients by math...
@@ -136,10 +151,13 @@ __global__ void composite_train_bw_kernel(
         dL_drgbs[s][1] = dL_drgb[ray_idx][1]*w;
         dL_drgbs[s][2] = dL_drgb[ray_idx][2]*w;
 
+        dL_duncerts[s] = dL_duncert[ray_idx]*w*w;
+
         dL_dsigmas[s] = deltas[s] * (
             dL_drgb[ray_idx][0]*(rgbs[s][0]*T-(R-r)) + 
             dL_drgb[ray_idx][1]*(rgbs[s][1]*T-(G-g)) + 
             dL_drgb[ray_idx][2]*(rgbs[s][2]*T-(B-b)) + // gradients from rgb
+            2*dL_duncert[ray_idx]*(uncerts[s]*T_p*T*a-(U-u)) + // gradient from uncert
             dL_dopacity[ray_idx]*(1-O) + // gradient from opacity
             dL_ddepth[ray_idx]*(ts[s]*T-(D-d)) + // gradient from depth
             T*dL_dws[s]-(dL_dws_times_ws_sum-dL_dws_times_ws[s]) // gradient from ws
@@ -155,9 +173,11 @@ std::vector<torch::Tensor> composite_train_bw_cu(
     const torch::Tensor dL_dopacity,
     const torch::Tensor dL_ddepth,
     const torch::Tensor dL_drgb,
+    const torch::Tensor dL_duncert,
     const torch::Tensor dL_dws,
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor ws,
     const torch::Tensor deltas,
     const torch::Tensor ts,
@@ -165,12 +185,14 @@ std::vector<torch::Tensor> composite_train_bw_cu(
     const torch::Tensor opacity,
     const torch::Tensor depth,
     const torch::Tensor rgb,
+    const torch::Tensor uncert,
     const float T_threshold
 ){
     const int N = sigmas.size(0), N_rays = rays_a.size(0);
 
     auto dL_dsigmas = torch::zeros({N}, sigmas.options());
     auto dL_drgbs = torch::zeros({N, 3}, sigmas.options());
+    auto dL_duncerts = torch::zeros({N}, sigmas.options());
 
     auto dL_dws_times_ws = dL_dws * ws; // auxiliary input
 
@@ -182,23 +204,27 @@ std::vector<torch::Tensor> composite_train_bw_cu(
             dL_dopacity.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             dL_ddepth.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             dL_drgb.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            dL_duncert.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             dL_dws.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             dL_dws_times_ws.data_ptr<scalar_t>(),
             sigmas.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rgbs.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            uncerts.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             deltas.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             ts.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rays_a.packed_accessor64<int64_t, 2, torch::RestrictPtrTraits>(),
             opacity.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             depth.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             rgb.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            uncert.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             T_threshold,
             dL_dsigmas.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
-            dL_drgbs.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>()
+            dL_drgbs.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            dL_duncerts.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>()
         );
     }));
 
-    return {dL_dsigmas, dL_drgbs};
+    return {dL_dsigmas, dL_drgbs, dL_duncerts};
 }
 
 
@@ -206,6 +232,7 @@ template <typename scalar_t>
 __global__ void composite_test_fw_kernel(
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> sigmas,
     const torch::PackedTensorAccessor<scalar_t, 3, torch::RestrictPtrTraits, size_t> rgbs,
+    const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> uncerts,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> deltas,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> ts,
     const torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> hits_t,
@@ -214,7 +241,8 @@ __global__ void composite_test_fw_kernel(
     const torch::PackedTensorAccessor32<int, 1, torch::RestrictPtrTraits> N_eff_samples,
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> opacity,
     torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> depth,
-    torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgb
+    torch::PackedTensorAccessor<scalar_t, 2, torch::RestrictPtrTraits, size_t> rgb,
+    torch::PackedTensorAccessor<scalar_t, 1, torch::RestrictPtrTraits, size_t> uncert
 ){
     const int n = blockIdx.x * blockDim.x + threadIdx.x;
     if (n >= alive_indices.size(0)) return;
@@ -236,6 +264,7 @@ __global__ void composite_test_fw_kernel(
         rgb[r][0] += w*rgbs[n][s][0];
         rgb[r][1] += w*rgbs[n][s][1];
         rgb[r][2] += w*rgbs[n][s][2];
+        uncert[r] += w*uncerts[n][s];
         depth[r] += w*ts[n][s];
         opacity[r] += w;
         T *= 1.0f-a;
@@ -252,6 +281,7 @@ __global__ void composite_test_fw_kernel(
 void composite_test_fw_cu(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor hits_t,
@@ -260,7 +290,8 @@ void composite_test_fw_cu(
     const torch::Tensor N_eff_samples,
     torch::Tensor opacity,
     torch::Tensor depth,
-    torch::Tensor rgb
+    torch::Tensor rgb,
+    torch::Tensor uncert
 ){
     const int N_rays = alive_indices.size(0);
 
@@ -271,6 +302,7 @@ void composite_test_fw_cu(
         composite_test_fw_kernel<scalar_t><<<blocks, threads>>>(
             sigmas.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
             rgbs.packed_accessor<scalar_t, 3, torch::RestrictPtrTraits, size_t>(),
+            uncerts.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
             deltas.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
             ts.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
             hits_t.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
@@ -279,7 +311,8 @@ void composite_test_fw_cu(
             N_eff_samples.packed_accessor32<int, 1, torch::RestrictPtrTraits>(),
             opacity.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
             depth.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>(),
-            rgb.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>()
+            rgb.packed_accessor<scalar_t, 2, torch::RestrictPtrTraits, size_t>(),
+            uncert.packed_accessor<scalar_t, 1, torch::RestrictPtrTraits, size_t>()
         );
     }));
 }

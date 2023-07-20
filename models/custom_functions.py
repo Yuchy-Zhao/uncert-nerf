@@ -1,5 +1,5 @@
 import torch
-import vren
+import vren_uncert
 from torch.cuda.amp import custom_fwd, custom_bwd
 from torch_scatter import segment_csr
 from einops import rearrange
@@ -26,7 +26,7 @@ class RayAABBIntersector(torch.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, rays_o, rays_d, center, half_size, max_hits):
-        return vren.ray_aabb_intersect(rays_o, rays_d, center, half_size, max_hits)
+        return vren_uncert.ray_aabb_intersect(rays_o, rays_d, center, half_size, max_hits)
 
 
 class RaySphereIntersector(torch.autograd.Function):
@@ -49,7 +49,7 @@ class RaySphereIntersector(torch.autograd.Function):
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
     def forward(ctx, rays_o, rays_d, center, radii, max_hits):
-        return vren.ray_sphere_intersect(rays_o, rays_d, center, radii, max_hits)
+        return vren_uncert.ray_sphere_intersect(rays_o, rays_d, center, radii, max_hits)
 
 
 class RayMarcher(torch.autograd.Function):
@@ -83,7 +83,7 @@ class RayMarcher(torch.autograd.Function):
         noise = torch.rand_like(rays_o[:, 0])
 
         rays_a, xyzs, dirs, deltas, ts, counter = \
-            vren.raymarching_train(
+            vren_uncert.raymarching_train(
                 rays_o, rays_d, hits_t,
                 density_bitfield, cascades, scale,
                 exp_step_factor, noise, grid_size, max_samples)
@@ -136,27 +136,27 @@ class VolumeRenderer(torch.autograd.Function):
     """
     @staticmethod
     @custom_fwd(cast_inputs=torch.float32)
-    def forward(ctx, sigmas, rgbs, deltas, ts, rays_a, T_threshold):
-        total_samples, opacity, depth, rgb, ws = \
-            vren.composite_train_fw(sigmas, rgbs, deltas, ts,
+    def forward(ctx, sigmas, rgbs, uncerts, deltas, ts, rays_a, T_threshold):
+        total_samples, opacity, depth, rgb, uncert, ws = \
+            vren_uncert.composite_train_fw(sigmas, rgbs, uncerts, deltas, ts,
                                     rays_a, T_threshold)
-        ctx.save_for_backward(sigmas, rgbs, deltas, ts, rays_a,
-                              opacity, depth, rgb, ws)
+        ctx.save_for_backward(sigmas, rgbs, uncerts, deltas, ts, rays_a,
+                              opacity, depth, rgb, uncert, ws)
         ctx.T_threshold = T_threshold
-        return total_samples.sum(), opacity, depth, rgb, ws
+        return total_samples.sum(), opacity, depth, rgb, uncert, ws
 
     @staticmethod
     @custom_bwd
-    def backward(ctx, dL_dtotal_samples, dL_dopacity, dL_ddepth, dL_drgb, dL_dws):
-        sigmas, rgbs, deltas, ts, rays_a, \
-        opacity, depth, rgb, ws = ctx.saved_tensors
-        dL_dsigmas, dL_drgbs = \
-            vren.composite_train_bw(dL_dopacity, dL_ddepth, dL_drgb, dL_dws,
-                                    sigmas, rgbs, ws, deltas, ts,
+    def backward(ctx, dL_dtotal_samples, dL_dopacity, dL_ddepth, dL_drgb, dL_duncert, dL_dws):
+        sigmas, rgbs, uncerts, deltas, ts, rays_a, \
+        opacity, depth, rgb, uncert, ws = ctx.saved_tensors
+        dL_dsigmas, dL_drgbs, dL_duncerts = \
+            vren_uncert.composite_train_bw(dL_dopacity, dL_ddepth, dL_drgb, dL_duncert, dL_dws,
+                                    sigmas, rgbs, uncerts, ws, deltas, ts,
                                     rays_a,
-                                    opacity, depth, rgb,
+                                    opacity, depth, rgb, uncert,
                                     ctx.T_threshold)
-        return dL_dsigmas, dL_drgbs, None, None, None, None
+        return dL_dsigmas, dL_drgbs, dL_duncerts, None, None, None, None
 
 
 class TruncExp(torch.autograd.Function):

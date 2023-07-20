@@ -165,7 +165,8 @@ class NeRFSystem(LightningModule):
                                            erode=self.hparams.dataset_name=='colmap')
 
         results = self(batch, split='train')
-        kwargs = {'use_depth': self.hparams.use_depth}
+        kwargs = {'use_depth': self.hparams.use_depth,
+                  'use_uncertainty': self.hparams.use_uncertainty}
         loss_d = self.loss(results, batch, **kwargs)
         if self.hparams.use_exposure:
             zero_radiance = torch.zeros(1, 3, device=self.device)
@@ -183,6 +184,8 @@ class NeRFSystem(LightningModule):
         self.log('train/loss_opacity', loss_d['opacity'].mean())
         if self.hparams.use_depth:
             self.log('train/loss_depth', loss_d['depth'].mean())
+        if self.hparams.use_uncertainty:
+            self.log('train/loss_uncert', loss_d['uncert'].mean())
         if self.hparams.distortion_loss_w > 0:
             self.log('train/loss_distortion', loss_d['distortion'].mean())
         # ray marching samples per ray (occupied space on the ray)
@@ -227,12 +230,12 @@ class NeRFSystem(LightningModule):
             rgb_pred = (rgb_pred*255).astype(np.uint8)
             rgb_gt = rearrange(batch['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_gt = (rgb_gt*255).astype(np.uint8)
+            uncert = depth2img(rearrange(results['uncert'].cpu().numpy(), '(h w) -> h w', h=h))
             depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_c.png'), rgb_pred)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_g.png'), rgb_gt)
+            imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_u.png'), uncert)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
-
-
         return logs
 
     def validation_epoch_end(self, outputs):
@@ -297,11 +300,14 @@ if __name__ == '__main__':
     if not hparams.no_save_test:
         imgs = sorted(glob.glob(os.path.join(system.val_dir, '*.png')))
         imageio.mimsave(os.path.join(system.val_dir, 'rgb.mp4'),
-                        [imageio.imread(img) for img in imgs[::3]],
+                        [imageio.imread(img) for img in imgs[::4]],
                         fps=10, macro_block_size=1)
         imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
-                        [imageio.imread(img) for img in imgs[1::3]],
+                        [imageio.imread(img) for img in imgs[1::4]],
                         fps=10, macro_block_size=1)
         imageio.mimsave(os.path.join(system.val_dir, 'GT.mp4'),
-                        [imageio.imread(img) for img in imgs[2::3]],
+                        [imageio.imread(img) for img in imgs[2::4]],
+                        fps=10, macro_block_size=1)
+        imageio.mimsave(os.path.join(system.val_dir, 'uncert.mp4'),
+                        [imageio.imread(img) for img in imgs[3::4]],
                         fps=10, macro_block_size=1)

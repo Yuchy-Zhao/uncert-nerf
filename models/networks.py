@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 import tinycudann as tcnn
-import vren
+import vren_uncert
 from einops import rearrange
 from .custom_functions import TruncExp
 import numpy as np
@@ -55,6 +55,30 @@ class NGP(nn.Module):
                 }
             )
 
+        self.alpha_net = \
+            tcnn.Network(
+                n_input_dims=16, n_output_dims=1,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": 32,
+                    "n_hidden_layers": 1,
+                }
+            )
+    
+        self.uncert_net = \
+            tcnn.Network(
+                n_input_dims=16, n_output_dims=1,
+                network_config={
+                    "otype": "FullyFusedMLP",
+                    "activation": "None",
+                    "output_activation": "None",
+                    "n_neurons": 32,
+                    "n_hidden_layers": 1,
+                }
+            )
+
         self.dir_encoder = \
             tcnn.Encoding(
                 n_input_dims=3,
@@ -102,7 +126,7 @@ class NGP(nn.Module):
         """
         x = (x-self.xyz_min)/(self.xyz_max-self.xyz_min)
         h = self.xyz_encoder(x)
-        sigmas = TruncExp.apply(h[:, 0])
+        sigmas = TruncExp.apply(self.alpha_net(h)[:, 0])
         if return_feat: return sigmas, h
         return sigmas
 
@@ -143,6 +167,7 @@ class NGP(nn.Module):
         d = d/torch.norm(d, dim=1, keepdim=True)
         d = self.dir_encoder((d+1)/2)
         rgbs = self.rgb_net(torch.cat([d, h], 1))
+        uncerts = TruncExp.apply(self.uncert_net(h)[:,0])
 
         if self.rgb_act == 'None': # rgbs is log-radiance
             if kwargs.get('output_radiance', False): # output HDR map
@@ -150,7 +175,7 @@ class NGP(nn.Module):
             else: # convert to LDR using tonemapper networks
                 rgbs = self.log_radiance_to_rgb(rgbs, **kwargs)
 
-        return sigmas, rgbs
+        return sigmas, rgbs, uncerts
 
     @torch.no_grad()
     def get_all_cells(self):
@@ -161,7 +186,7 @@ class NGP(nn.Module):
             cells: list (of length self.cascades) of indices and coords
                    selected at each cascade
         """
-        indices = vren.morton3D(self.grid_coords).long()
+        indices = vren_uncert.morton3D(self.grid_coords).long()
         cells = [(indices, self.grid_coords)] * self.cascades
 
         return cells
@@ -181,14 +206,14 @@ class NGP(nn.Module):
             # uniform cells
             coords1 = torch.randint(self.grid_size, (M, 3), dtype=torch.int32,
                                     device=self.density_grid.device)
-            indices1 = vren.morton3D(coords1).long()
+            indices1 = vren_uncert.morton3D(coords1).long()
             # occupied cells
             indices2 = torch.nonzero(self.density_grid[c]>density_threshold)[:, 0]
             if len(indices2)>0:
                 rand_idx = torch.randint(len(indices2), (M,),
                                          device=self.density_grid.device)
                 indices2 = indices2[rand_idx]
-            coords2 = vren.morton3D_invert(indices2.int())
+            coords2 = vren_uncert.morton3D_invert(indices2.int())
             # concatenate
             cells += [(torch.cat([indices1, indices2]), torch.cat([coords1, coords2]))]
 
@@ -265,5 +290,5 @@ class NGP(nn.Module):
 
         mean_density = self.density_grid[self.density_grid>0].mean().item()
 
-        vren.packbits(self.density_grid, min(mean_density, density_threshold),
+        vren_uncert.packbits(self.density_grid, min(mean_density, density_threshold),
                       self.density_bitfield)

@@ -34,6 +34,8 @@ def get_opts():
                         0 to disable (default), to enable,
                         a good value is 1e-3 for real scene and 1e-2 for synthetic scene
                         ''')
+    parser.add_argument('--use_uncertainty', action='store_true', default=False,
+                        help='whether to train with uncertainty estimation')
 
     # training options
     parser.add_argument('--batch_size', type=int, default=8192,

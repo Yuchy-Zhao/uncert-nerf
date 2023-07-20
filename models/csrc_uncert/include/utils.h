@@ -67,6 +67,7 @@ std::vector<torch::Tensor> raymarching_test_cu(
 std::vector<torch::Tensor> composite_train_fw_cu(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor rays_a,
@@ -78,9 +79,11 @@ std::vector<torch::Tensor> composite_train_bw_cu(
     const torch::Tensor dL_dopacity,
     const torch::Tensor dL_ddepth,
     const torch::Tensor dL_drgb,
+    const torch::Tensor dL_duncert,
     const torch::Tensor dL_dws,
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor ws,
     const torch::Tensor deltas,
     const torch::Tensor ts,
@@ -88,6 +91,7 @@ std::vector<torch::Tensor> composite_train_bw_cu(
     const torch::Tensor opacity,
     const torch::Tensor depth,
     const torch::Tensor rgb,
+    const torch::Tensor uncert,
     const float T_threshold
 );
 
@@ -95,6 +99,7 @@ std::vector<torch::Tensor> composite_train_bw_cu(
 void composite_test_fw_cu(
     const torch::Tensor sigmas,
     const torch::Tensor rgbs,
+    const torch::Tensor uncerts,
     const torch::Tensor deltas,
     const torch::Tensor ts,
     const torch::Tensor hits_t,
@@ -103,7 +108,8 @@ void composite_test_fw_cu(
     const torch::Tensor N_eff_samples,
     torch::Tensor opacity,
     torch::Tensor depth,
-    torch::Tensor rgb
+    torch::Tensor rgb,
+    torch::Tensor uncert
 );
 
 

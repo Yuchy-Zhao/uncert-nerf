@@ -29,7 +29,7 @@ def get_opts():
                         0 to disable (default), to enable,
                         a good value is 1e-3 for real scene and 1e-2 for synthetic scene
                         ''')
-    parser.add_argument('--distortion_loss_w', type=float, default=1e-3,
+    parser.add_argument('--distortion_loss_w', type=float, default=0,
                         help='''weight of distortion loss (see losses.py),
                         0 to disable (default), to enable,
                         a good value is 1e-3 for real scene and 1e-2 for synthetic scene
@@ -38,6 +38,8 @@ def get_opts():
     # training options
     parser.add_argument('--batch_size', type=int, default=8192,
                         help='number of rays in a batch')
+    parser.add_argument('--chunk', type=int, default=32*1024,
+                        help='chunk size to split the input to avoid OOM')
     parser.add_argument('--ray_sampling_strategy', type=str, default='all_images',
                         choices=['all_images', 'same_image'],
                         help='''
@@ -58,6 +60,17 @@ def get_opts():
                         to avoid objects with black color to be predicted as transparent
                         ''')
 
+    parser.add_argument('--N_samples', type=int, default=64,
+                        help='number of coarse samples')
+    parser.add_argument('--N_importance', type=int, default=128,
+                        help='number of additional fine samples')
+    parser.add_argument('--use_disp', default=False, action="store_true",
+                        help='use disparity depth sampling')
+    parser.add_argument('--perturb', type=float, default=1.0,
+                        help='factor to perturb depth sampling points')
+    parser.add_argument('--noise_std', type=float, default=1.0,
+                        help='std dev of noise added to regularize sigma')
+    
     # validation options
     parser.add_argument('--eval_lpips', action='store_true', default=False,
                         help='evaluate lpips metric (consumes more VRAM)')

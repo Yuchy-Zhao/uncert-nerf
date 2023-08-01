@@ -7,6 +7,7 @@ import imageio
 import numpy as np
 import cv2
 from einops import rearrange
+from collections import defaultdict
 
 # data
 from torch.utils.data import DataLoader
@@ -15,8 +16,8 @@ from datasets.ray_utils import axisangle_to_R, get_rays
 
 # models
 from kornia.utils.grid import create_meshgrid3d
-from models.networks import NGP
-from models.rendering import render, MAX_SAMPLES
+from models.networks import NeRF, Embedding
+from models.rendering import render
 
 # optimizer, losses
 from apex.optimizers import FusedAdam
@@ -68,13 +69,15 @@ class NeRFSystem(LightningModule):
             for p in self.val_lpips.net.parameters():
                 p.requires_grad = False
 
-        rgb_act = 'None' if self.hparams.use_exposure else 'Sigmoid'
-        self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act)
-        G = self.model.grid_size
-        self.model.register_buffer('density_grid',
-            torch.zeros(self.model.cascades, G**3))
-        self.model.register_buffer('grid_coords',
-            create_meshgrid3d(G, G, G, False, dtype=torch.int32).reshape(-1, 3))
+        self.embedding_xyz = Embedding(3, 10) # 10 is the default number
+        self.embedding_dir = Embedding(3, 4) # 4 is the default number
+        self.embeddings = [self.embedding_xyz, self.embedding_dir]
+
+        self.nerf_coarse = NeRF()
+        self.models = [self.nerf_coarse]
+        if hparams.N_importance > 0:
+            self.nerf_fine = NeRF()
+            self.models += [self.nerf_fine]            
 
     def forward(self, batch, split):
         if split=='train':
@@ -92,13 +95,27 @@ class NeRFSystem(LightningModule):
         rays_o, rays_d = get_rays(directions, poses)
 
         kwargs = {'test_time': split!='train',
-                  'random_bg': self.hparams.random_bg}
-        if self.hparams.scale > 0.5:
-            kwargs['exp_step_factor'] = 1/256
-        if self.hparams.use_exposure:
-            kwargs['exposure'] = batch['exposure']
+                  'random_bg': self.hparams.random_bg,
+                  'N_samples': self.hparams.N_samples,
+                  'use_disp' : self.hparams.use_disp,
+                  'perturb'  : self.hparams.perturb,
+                  'noise_std': self.hparams.noise_std,
+                  'N_importance' : self.hparams.N_importance,
+                  'chunk'    : self.hparams.chunk}
 
-        return render(self.model, rays_o, rays_d, **kwargs)
+        results = defaultdict(list)
+        for i in range(0, rays_o.shape[0], self.hparams.chunk):
+            rendered_ray_chunks = \
+                render(self.models, self.embeddings, 
+                       rays_o[i:i+self.hparams.chunk], 
+                       rays_d[i:i+self.hparams.chunk], 
+                       **kwargs)
+            for k, v in rendered_ray_chunks.items():
+                results[k] += [v]
+
+        for k, v in results.items():
+            results[k] = torch.cat(v, 0)
+        return results
 
     def setup(self, stage):
         dataset = dataset_dict[self.hparams.dataset_name]
@@ -123,7 +140,7 @@ class NeRFSystem(LightningModule):
             self.register_parameter('dT',
                 nn.Parameter(torch.zeros(N, 3, device=self.device)))
 
-        load_ckpt(self.model, self.hparams.weight_path)
+        load_ckpt(self.models, self.hparams.weight_path)
 
         net_params = []
         for n, p in self.named_parameters():
@@ -153,26 +170,10 @@ class NeRFSystem(LightningModule):
                           batch_size=None,
                           pin_memory=True)
 
-    def on_train_start(self):
-        self.model.mark_invisible_cells(self.train_dataset.K.to(self.device),
-                                        self.poses,
-                                        self.train_dataset.img_wh)
-
     def training_step(self, batch, batch_nb, *args):
-        if self.global_step%self.update_interval == 0:
-            self.model.update_density_grid(0.01*MAX_SAMPLES/3**0.5,
-                                           warmup=self.global_step<self.warmup_steps,
-                                           erode=self.hparams.dataset_name=='colmap')
-
         results = self(batch, split='train')
         kwargs = {'use_depth': self.hparams.use_depth}
         loss_d = self.loss(results, batch, **kwargs)
-        if self.hparams.use_exposure:
-            zero_radiance = torch.zeros(1, 3, device=self.device)
-            unit_exposure_rgb = self.model.log_radiance_to_rgb(zero_radiance,
-                                    **{'exposure': torch.ones(1, 1, device=self.device)})
-            loss_d['unit_exposure'] = \
-                0.5*(unit_exposure_rgb-self.train_dataset.unit_exposure_rgb)**2
         loss = sum(lo.mean() for lo in loss_d.values())
 
         with torch.no_grad():
@@ -185,10 +186,6 @@ class NeRFSystem(LightningModule):
             self.log('train/loss_depth', loss_d['depth'].mean())
         if self.hparams.distortion_loss_w > 0:
             self.log('train/loss_distortion', loss_d['distortion'].mean())
-        # ray marching samples per ray (occupied space on the ray)
-        self.log('train/rm_s', results['rm_samples']/len(batch['rgb']), True)
-        # volume rendering samples per ray (stops marching when transmittance drops below 1e-4)
-        self.log('train/vr_s', results['vr_samples']/len(batch['rgb']), True)
         self.log('train/psnr', self.train_psnr, True)
 
         return loss
@@ -231,8 +228,6 @@ class NeRFSystem(LightningModule):
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_c.png'), rgb_pred)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_g.png'), rgb_gt)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
-
-
         return logs
 
     def validation_epoch_end(self, outputs):

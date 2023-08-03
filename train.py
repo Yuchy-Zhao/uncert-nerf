@@ -31,6 +31,7 @@ from torchmetrics import (
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 # pytorch-lightning
+from pytorch_lightning.utilities import seed
 from pytorch_lightning.plugins import DDPPlugin
 from pytorch_lightning import LightningModule, Trainer
 from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
@@ -54,6 +55,7 @@ class NeRFSystem(LightningModule):
     def __init__(self, hparams):
         super().__init__()
         self.save_hyperparameters(hparams)
+        seed.seed_everything(0)
 
         self.warmup_steps = 256
         self.update_interval = 16
@@ -68,8 +70,7 @@ class NeRFSystem(LightningModule):
             for p in self.val_lpips.net.parameters():
                 p.requires_grad = False
 
-        rgb_act = 'None' if self.hparams.use_exposure else 'Sigmoid'
-        self.model = NGP(scale=self.hparams.scale, rgb_act=rgb_act)
+        self.model = NGP(scale=self.hparams.scale)
         G = self.model.grid_size
         self.model.register_buffer('density_grid',
             torch.zeros(self.model.cascades, G**3))
@@ -95,8 +96,6 @@ class NeRFSystem(LightningModule):
                   'random_bg': self.hparams.random_bg}
         if self.hparams.scale > 0.5:
             kwargs['exp_step_factor'] = 1/256
-        if self.hparams.use_exposure:
-            kwargs['exposure'] = batch['exposure']
 
         return render(self.model, rays_o, rays_d, **kwargs)
 
@@ -168,12 +167,6 @@ class NeRFSystem(LightningModule):
         kwargs = {'use_depth': self.hparams.use_depth,
                   'use_uncertainty': self.hparams.use_uncertainty}
         loss_d = self.loss(results, batch, **kwargs)
-        if self.hparams.use_exposure:
-            zero_radiance = torch.zeros(1, 3, device=self.device)
-            unit_exposure_rgb = self.model.log_radiance_to_rgb(zero_radiance,
-                                    **{'exposure': torch.ones(1, 1, device=self.device)})
-            loss_d['unit_exposure'] = \
-                0.5*(unit_exposure_rgb-self.train_dataset.unit_exposure_rgb)**2
         loss = sum(lo.mean() for lo in loss_d.values())
 
         with torch.no_grad():

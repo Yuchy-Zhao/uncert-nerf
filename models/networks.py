@@ -10,10 +10,8 @@ from .rendering import NEAR_DISTANCE
 
 
 class NGP(nn.Module):
-    def __init__(self, scale, rgb_act='Sigmoid'):
+    def __init__(self, scale):
         super().__init__()
-
-        self.rgb_act = rgb_act
 
         # scene bounding box
         self.scale = scale
@@ -94,26 +92,11 @@ class NGP(nn.Module):
                 network_config={
                     "otype": "FullyFusedMLP",
                     "activation": "ReLU",
-                    "output_activation": self.rgb_act,
+                    "output_activation": "Sigmoid",
                     "n_neurons": 64,
                     "n_hidden_layers": 2,
                 }
             )
-
-        if self.rgb_act == 'None': # rgb_net output is log-radiance
-            for i in range(3): # independent tonemappers for r,g,b
-                tonemapper_net = \
-                    tcnn.Network(
-                        n_input_dims=1, n_output_dims=1,
-                        network_config={
-                            "otype": "FullyFusedMLP",
-                            "activation": "ReLU",
-                            "output_activation": "Sigmoid",
-                            "n_neurons": 64,
-                            "n_hidden_layers": 1,
-                        }
-                    )
-                setattr(self, f'tonemapper_net_{i}', tonemapper_net)
 
     def density(self, x, return_feat=False):
         """
@@ -130,29 +113,6 @@ class NGP(nn.Module):
         if return_feat: return sigmas, h
         return sigmas
 
-    def log_radiance_to_rgb(self, log_radiances, **kwargs):
-        """
-        Convert log-radiance to rgb as the setting in HDR-NeRF.
-        Called only when self.rgb_act == 'None' (with exposure)
-
-        Inputs:
-            log_radiances: (N, 3)
-
-        Outputs:
-            rgbs: (N, 3)
-        """
-        if 'exposure' in kwargs:
-            log_exposure = torch.log(kwargs['exposure'])
-        else: # unit exposure by default
-            log_exposure = 0
-
-        out = []
-        for i in range(3):
-            inp = log_radiances[:, i:i+1]+log_exposure
-            out += [getattr(self, f'tonemapper_net_{i}')(inp)]
-        rgbs = torch.cat(out, 1)
-        return rgbs
-
     def forward(self, x, d, **kwargs):
         """
         Inputs:
@@ -168,13 +128,6 @@ class NGP(nn.Module):
         d = self.dir_encoder((d+1)/2)
         rgbs = self.rgb_net(torch.cat([d, h], 1))
         uncerts = TruncExp.apply(self.uncert_net(h)[:,0])
-
-        if self.rgb_act == 'None': # rgbs is log-radiance
-            if kwargs.get('output_radiance', False): # output HDR map
-                rgbs = TruncExp.apply(rgbs)
-            else: # convert to LDR using tonemapper networks
-                rgbs = self.log_radiance_to_rgb(rgbs, **kwargs)
-
         return sigmas, rgbs, uncerts
 
     @torch.no_grad()

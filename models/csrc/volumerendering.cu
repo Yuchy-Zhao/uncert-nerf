@@ -124,7 +124,7 @@ __global__ void composite_train_bw_kernel(
     scalar_t R = rgb[ray_idx][0], G = rgb[ray_idx][1], B = rgb[ray_idx][2];
     scalar_t U = uncert[ray_idx];
     scalar_t O = opacity[ray_idx], D = depth[ray_idx];
-    scalar_t T = 1.0f, r = 0.0f, g = 0.0f, b = 0.0f, d = 0.0f;
+    scalar_t T = 1.0f, r = 0.0f, g = 0.0f, b = 0.0f, o = 0.0f, d = 0.0f;
     scalar_t u = 0.0f;
 
     // compute prefix sum of dL_dws * ws
@@ -142,7 +142,7 @@ __global__ void composite_train_bw_kernel(
 
         r += w*rgbs[s][0]; g += w*rgbs[s][1]; b += w*rgbs[s][2];
         u += w*w*uncerts[s];
-        d += w*ts[s];
+        d += w*ts[s], o += w;
         scalar_t T_p = T;
         T *= 1.0f-a;
 
@@ -158,7 +158,7 @@ __global__ void composite_train_bw_kernel(
             dL_drgb[ray_idx][1]*(rgbs[s][1]*T-(G-g)) + 
             dL_drgb[ray_idx][2]*(rgbs[s][2]*T-(B-b)) + // gradients from rgb
             2*dL_duncert[ray_idx]*(uncerts[s]*T_p*T*a-(U-u)) + // gradient from uncert
-            dL_dopacity[ray_idx]*(1-O) + // gradient from opacity
+            dL_dopacity[ray_idx]*(T-(O-o)) + // gradient from opacity
             dL_ddepth[ray_idx]*(ts[s]*T-(D-d)) + // gradient from depth
             T*dL_dws[s]-(dL_dws_times_ws_sum-dL_dws_times_ws[s]) // gradient from ws
         );

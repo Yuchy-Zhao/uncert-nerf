@@ -53,14 +53,16 @@ class NeRFLoss(nn.Module):
             d['depth'] = torch.abs(results['depth']-target['depth'])
 
         if kwargs.get('use_uncertainty', True):
+            # torch.mean((1 / (2*(uncert+1e-9).unsqueeze(-1))) *((x - y) ** 2)) + 0.5*torch.mean(torch.log(uncert+1e-9)) + w * alpha.mean() + 4.0
             mask = (results['uncert'] == 0).detach()
-            d['uncert'] = ((results['rgb'][~mask]-target['rgb'][~mask])**2) / \
-                        (2*(results['uncert'][~mask]+1e-9).unsqueeze(-1)) + \
-                        torch.log(results['uncert'][~mask]+1e-9).unsqueeze(-1) / 2
+            u = results['uncert'].unsqueeze(-1) + 1e-10
+            d['uncert'] = d['rgb'][~mask] / u[~mask] \
+                           + torch.log(u[~mask]) / 2
 
-        o = results['opacity']+1e-10
-        # # encourage opacity to be either 0 or 1 to avoid floater
-        d['opacity'] = self.lambda_opacity*(-o*torch.log(o))
+        if self.lambda_distortion > 0:
+            o = results['opacity']+1e-10
+            # # encourage opacity to be either 0 or 1 to avoid floater
+            d['opacity'] = self.lambda_opacity*(-o*torch.log(o))
 
         if self.lambda_distortion > 0:
             d['distortion'] = self.lambda_distortion * \

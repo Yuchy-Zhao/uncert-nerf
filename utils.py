@@ -1,4 +1,14 @@
+import cv2
+import numpy as np
 import torch
+
+
+def depth2img(depth):
+    depth = (depth-depth.min())/(depth.max()-depth.min())
+    depth_img = cv2.applyColorMap((depth*255).astype(np.uint8),
+                                  cv2.COLORMAP_TURBO)
+
+    return depth_img
 
 
 def extract_model_state_dict(ckpt_path, model_name='model', prefixes_to_ignore=[]):

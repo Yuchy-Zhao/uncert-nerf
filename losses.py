@@ -38,24 +38,43 @@ class DistortionLoss(torch.autograd.Function):
 
 
 class NeRFLoss(nn.Module):
-    def __init__(self, lambda_opacity=1e-3, lambda_distortion=1e-3):
+    def __init__(self, lambda_opacity=1e-3, lambda_distortion=1e-3, lambda_uncertainty=False):
         super().__init__()
 
         self.lambda_opacity = lambda_opacity
         self.lambda_distortion = lambda_distortion
+        self.lambda_uncertainty = lambda_uncertainty
+
+    def uncert_loss(self, x, y, uncert, alphas, w=0.01):
+        term1 = torch.mean(((x - y) ** 2) / (2 * (uncert+1e-9).unsqueeze(-1)), dim=1)
+        term2 = 0.5 * torch.log(uncert+1e-9)
+        term3 = w * torch.mean(alphas, dim=1)
+        return term1 + term2 + term3
 
     def forward(self, results, target, **kwargs):
         d = {}
-        d['rgb'] = (results['rgb']-target['rgb'])**2
-
+        # RGB Loss
+        d['rgb'] = torch.mean((results['rgb_coarse']-target['rgb'])**2, dim=1)
+        if 'rgb_fine' in results:
+            if self.lambda_uncertainty:
+                if results['uncert_fine'].min() > 0:
+                    d['rgb'] += self.uncert_loss(results['rgb_fine'], target['rgb'], results['uncert_fine'], results['alphas_fine'])
+                else:
+                    d['rgb'] += torch.mean((results['rgb_fine']-target['rgb'])**2, dim=1)
+            else:
+                d['rgb'] += torch.mean((results['rgb_fine']-target['rgb'])**2, dim=1)
+        
+        # Loss of Depth
         if kwargs.get('use_depth', True):
-            # d['depth'] = (results['depth']-target['depth'])**2
             d['depth'] = torch.abs(results['depth']-target['depth'])
-
-        o = results['opacity']+1e-10
-        # # encourage opacity to be either 0 or 1 to avoid floater
-        d['opacity'] = self.lambda_opacity*(-o*torch.log(o))
-
+        
+        # Opacity Loss
+        if self.lambda_opacity > 0:
+            o = results['opacity']+1e-10
+            # # encourage opacity to be either 0 or 1 to avoid floater
+            d['opacity'] = self.lambda_opacity*(-o*torch.log(o))
+        
+        # Distortion Loss
         if self.lambda_distortion > 0:
             d['distortion'] = self.lambda_distortion * \
                 DistortionLoss.apply(results['ws'], results['deltas'],

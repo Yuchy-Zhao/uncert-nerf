@@ -1,14 +1,56 @@
+train_idx = list(range(0, 20))
+hold_idx = list(range(21, 100))        
+
+# # Active Operation
+        self.choose_new_k(k=5)
+        self.setup(stage='fit')
+        print('Train', train_idx)
+        print('Hold', hold_idx)
+    
+
+    @torch.no_grad()
+    def choose_new_k(self, k): 
+        dataset = dataset_dict[self.hparams.dataset_name]
+        kwargs = {'root_dir': self.hparams.root_dir,
+                  'downsample': self.hparams.downsample,
+                  'use_depth': self.hparams.use_depth,
+                  'idxs': hold_idx}
+        hold_dataset = dataset(split='test', **kwargs)
+        hold_loader = DataLoader(hold_dataset,
+                                num_workers=8,
+                                batch_size=None,
+                                pin_memory=True)
+        info_entropy = []
+        for batch_nb, batch in enumerate(hold_loader):
+            batch['pose'] = batch['pose'].to('cuda')
+            results = self(batch, split='test')
+            uncert= results['uncert_fine'] + 1e-9
+            uncerts = results['uncerts_fine'] + 1e-9
+            weights = results['weights_fine'] 
+            pre_bayesian = uncerts.sum()
+            post_bayesian = (1./ (1./uncerts+weights*weights/uncert.unsqueeze(1))).sum()
+            info_entropy.append(pre_bayesian-post_bayesian)
+        idxs = torch.topk(torch.tensor(info_entropy), k)[1].cpu().numpy()
+        for idx in idxs:
+            train_idx.append(hold_idx[idx])
+            del(hold_idx[idx])
+        return idxs
+
+
+
+
 import torch
 from torchsearchsorted import searchsorted
 
 
-"""
-Function dependencies: (-> means function calls)
+def near_far_from_sphere(rays_o, rays_d):
+    a = torch.sum(rays_d**2, dim=-1, keepdim=True)
+    b = 2.0 * torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+    mid = 0.5 * (-b) / a
+    near = mid - 1.0
+    far = mid + 1.0
+    return near, far
 
-@render_rays -> @inference
-
-@render_rays -> @sample_pdf if there is fine model
-"""
 
 def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     """
@@ -54,18 +96,12 @@ def sample_pdf(bins, weights, N_importance, det=False, eps=1e-5):
     return samples
 
 
-def render_rays(models,
-                embeddings,
-                rays,
-                N_samples=64,
-                use_disp=False,
-                perturb=0,
-                noise_std=1,
-                N_importance=0,
-                chunk=1024*32,
-                white_back=False,
-                test_time=False
-                ):
+def render(models,
+           embeddings,
+           rays_o,
+           rays_d,
+           **kwargs
+           ):
     """
     Render rays by computing the output of @model applied on @rays
 
@@ -73,13 +109,14 @@ def render_rays(models,
         models: list of NeRF models (coarse and fine) defined in nerf.py
         embeddings: list of embedding models of origin and direction defined in nerf.py
         rays: (N_rays, 3+3+2), ray origins, directions and near, far depth bounds
+        
         N_samples: number of coarse samples per ray
         use_disp: whether to sample in disparity space (inverse depth)
         perturb: factor to perturb the sampling position on the ray (for coarse model only)
         noise_std: factor to perturb the model's prediction of sigma
         N_importance: number of fine samples per ray
         chunk: the chunk size in batched inference
-        white_back: whether the background is white (dataset dependent)
+        random_bg: whether the background is white (dataset dependent)
         test_time: whether it is test (inference only) or not. If True, it will not do inference
                    on coarse rgb to save time
 
@@ -121,12 +158,12 @@ def render_rays(models,
         # Perform model inference to get rgb and raw sigma
         B = xyz_.shape[0]
         out_chunks = []
-        for i in range(0, B, chunk):
+        for i in range(0, B, kwargs['chunk']):
             # Embed positions by chunk
-            xyz_embedded = embedding_xyz(xyz_[i:i+chunk])
+            xyz_embedded = embedding_xyz(xyz_[i:i+kwargs['chunk']])
             if not weights_only:
                 xyzdir_embedded = torch.cat([xyz_embedded,
-                                             dir_embedded[i:i+chunk]], 1)
+                                             dir_embedded[i:i+kwargs['chunk']]], 1)
             else:
                 xyzdir_embedded = xyz_embedded
             out_chunks += [model(xyzdir_embedded, sigma_only=weights_only)]
@@ -138,7 +175,7 @@ def render_rays(models,
             rgbsigma = out.view(N_rays, N_samples_, 5)
             rgbs = rgbsigma[..., :3] # (N_rays, N_samples_, 3)
             sigmas = rgbsigma[..., 3] # (N_rays, N_samples_)
-            uncerts = rgbsigma[..., 4] # (N_rays, N_samples_)
+            uncerts = rgbsigma[..., 4]
 
         # Convert these values using volume rendering (Section 4)
         deltas = z_vals[:, 1:] - z_vals[:, :-1] # (N_rays, N_samples_-1)
@@ -149,7 +186,7 @@ def render_rays(models,
         # to convert to real world distance (accounts for non-unit directions).
         deltas = deltas * torch.norm(dir_.unsqueeze(1), dim=-1)
 
-        noise = torch.randn(sigmas.shape, device=sigmas.device) * noise_std
+        noise = torch.randn(sigmas.shape, device=sigmas.device) * kwargs['noise_std']
 
         # compute alpha by the formula (3)
         alphas = 1-torch.exp(-deltas*torch.relu(sigmas+noise)) # (N_rays, N_samples_)
@@ -164,13 +201,18 @@ def render_rays(models,
 
         # compute final weighted outputs
         rgb_final = torch.sum(weights.unsqueeze(-1)*rgbs, -2) # (N_rays, 3)
-        depth_final = torch.sum(weights*z_vals, -1) # (N_rays)
         uncert_final = torch.sum(weights*weights*uncerts, -1) # (N_rays)
+        depth_final = torch.sum(weights*z_vals, -1) # (N_rays)
+        
 
-        if white_back:
-            rgb_final = rgb_final + 1-weights_sum.unsqueeze(-1)
+        if kwargs.get('random_bg', False):
+            rgb_bg = torch.rand(3, device=rays_o.device)
+        else:
+            rgb_bg = torch.zeros(3, device=rays_o.device)
+        rgb_final = rgb_final + \
+                     rgb_bg*(1-weights_sum.unsqueeze(-1))
 
-        return rgb_final, depth_final, uncert_final, weights, alphas
+        return rgb_final, uncert_final, depth_final, weights, uncerts, alphas
 
 
     # Extract models from lists
@@ -178,55 +220,58 @@ def render_rays(models,
     embedding_xyz = embeddings[0]
     embedding_dir = embeddings[1]
 
+
     # Decompose the inputs
-    N_rays = rays.shape[0]
-    rays_o, rays_d = rays[:, 0:3], rays[:, 3:6] # both (N_rays, 3)
-    near, far = rays[:, 6:7], rays[:, 7:8] # both (N_rays, 1)
+    N_rays = rays_o.shape[0]
+    # near, far = near_far_from_sphere(rays_o, rays_d) # both (N_rays, 1)
+    near, far = torch.ones((N_rays, 1), device=rays_o.device)*2, torch.ones((N_rays, 1), device=rays_o.device)*6
 
     # Embed direction
     dir_embedded = embedding_dir(rays_d) # (N_rays, embed_dir_channels)
 
     # Sample depth points
-    z_steps = torch.linspace(0, 1, N_samples, device=rays.device) # (N_samples)
-    if not use_disp: # use linear sampling in depth space
+    z_steps = torch.linspace(0, 1, kwargs['N_samples'], device=rays_o.device) # (N_samples)
+    if not kwargs['use_disp']: # use linear sampling in depth space
         z_vals = near * (1-z_steps) + far * z_steps
     else: # use linear sampling in disparity space
         z_vals = 1/(1/near * (1-z_steps) + 1/far * z_steps)
 
-    z_vals = z_vals.expand(N_rays, N_samples)
+    z_vals = z_vals.expand(N_rays, kwargs['N_samples'])
     
-    if perturb > 0: # perturb sampling depths (z_vals)
+    if kwargs['perturb'] > 0: # perturb sampling depths (z_vals)
         z_vals_mid = 0.5 * (z_vals[: ,:-1] + z_vals[: ,1:]) # (N_rays, N_samples-1) interval mid points
         # get intervals between samples
         upper = torch.cat([z_vals_mid, z_vals[: ,-1:]], -1)
         lower = torch.cat([z_vals[: ,:1], z_vals_mid], -1)
         
-        perturb_rand = perturb * torch.rand(z_vals.shape, device=rays.device)
+        perturb_rand = kwargs['perturb'] * torch.rand(z_vals.shape, device=rays_o.device)
         z_vals = lower + (upper - lower) * perturb_rand
 
     xyz_coarse_sampled = rays_o.unsqueeze(1) + \
                          rays_d.unsqueeze(1) * z_vals.unsqueeze(2) # (N_rays, N_samples, 3)
 
-    if test_time:
+    if kwargs['test_time']:
         weights_coarse = \
             inference(model_coarse, embedding_xyz, xyz_coarse_sampled, rays_d,
                       dir_embedded, z_vals, weights_only=True)
         result = {'opacity_coarse': weights_coarse.sum(1)}
     else:
-        rgb_coarse, depth_coarse, uncert_coarse, weights_coarse, alphas_coarse = \
+        rgb_coarse, uncert_coarse, depth_coarse, weights_coarse, uncerts_coarse, alphas_coarse = \
             inference(model_coarse, embedding_xyz, xyz_coarse_sampled, rays_d,
                       dir_embedded, z_vals, weights_only=False)
         result = {'rgb_coarse': rgb_coarse,
-                  'depth_coarse': depth_coarse,
                   'uncert_coarse': uncert_coarse,
+                  'depth_coarse': depth_coarse,
+                  'weights_coarse': weights_coarse,
+                  'uncerts_coarse': uncerts_coarse,
                   'alphas_coarse': alphas_coarse,
                   'opacity_coarse': weights_coarse.sum(1)
                  }
 
-    if N_importance > 0: # sample points for fine model
+    if kwargs['N_importance'] > 0: # sample points for fine model
         z_vals_mid = 0.5 * (z_vals[: ,:-1] + z_vals[: ,1:]) # (N_rays, N_samples-1) interval mid points
         z_vals_ = sample_pdf(z_vals_mid, weights_coarse[:, 1:-1],
-                             N_importance, det=(perturb==0)).detach()
+                             kwargs['N_importance'], det=(kwargs['perturb']==0)).detach()
                   # detach so that grad doesn't propogate to weights_coarse from here
 
         z_vals, _ = torch.sort(torch.cat([z_vals, z_vals_], -1), -1)
@@ -236,13 +281,14 @@ def render_rays(models,
                            # (N_rays, N_samples+N_importance, 3)
 
         model_fine = models[1]
-        rgb_fine, depth_fine, uncert_fine, weights_fine, alphas_fine = \
+        rgb_fine, uncert_fine, depth_fine, weights_fine, uncerts_fine, alphas_fine = \
             inference(model_fine, embedding_xyz, xyz_fine_sampled, rays_d,
                       dir_embedded, z_vals, weights_only=False)
-
         result['rgb_fine'] = rgb_fine
-        result['depth_fine'] = depth_fine
         result['uncert_fine'] = uncert_fine
+        result['depth_fine'] = depth_fine
+        result['weights_fine'] = weights_fine
+        result['uncerts_fine'] = uncerts_fine
         result['alphas_fine'] = alphas_fine
         result['opacity_fine'] = weights_fine.sum(1)
 

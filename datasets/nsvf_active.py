@@ -10,7 +10,7 @@ from .color_utils import read_image
 from .base import BaseDataset
 
 
-class NSVFDataset(BaseDataset):
+class ActiveNSVFDataset(BaseDataset):
     def __init__(self, root_dir, split='train', downsample=1.0, **kwargs):
         super().__init__(root_dir, split, downsample)
 
@@ -69,20 +69,21 @@ class NSVFDataset(BaseDataset):
                 poses = poses.reshape(-1, 4, 4)
             for pose in poses:
                 c2w = pose[:3]
-                # c2w[:, 0] *= -1 # [left down front] to [right down front]
+                c2w[:, 0] *= -1 # [left down front] to [right down front]
                 c2w[:, 3] -= self.shift
                 c2w[:, 3] /= 2*self.scale # to bound the scene inside [-0.5, 0.5]
                 self.poses += [c2w]
         else:
             if split == 'train': prefix = '0_'
-            elif split == 'trainval': prefix = '[0-1]_'
-            elif split == 'trainvaltest': prefix = '[0-2]_'
             elif split == 'val': prefix = '1_'
             elif 'Synthetic' in self.root_dir: prefix = '2_' # test set for synthetic scenes
             elif split == 'test': prefix = '1_' # test set for real scenes
             else: raise ValueError(f'{split} split not recognized!')
             img_paths = sorted(glob.glob(os.path.join(self.root_dir, 'rgb', prefix+'*.png')))
             poses = sorted(glob.glob(os.path.join(self.root_dir, 'pose', prefix+'*.txt')))
+            if split == 'train':
+                img_paths = [img_paths[idx] for idx in self.kwargs['idxs']]
+                poses = [poses[idx] for idx in self.kwargs['idxs']]
 
             print(f'Loading {len(img_paths)} {split} images ...')
             for img_path, pose in tqdm(zip(img_paths, poses)):
@@ -99,4 +100,4 @@ class NSVFDataset(BaseDataset):
                 self.rays += [img]
 
             self.rays = torch.FloatTensor(np.stack(self.rays)) # (N_images, hw, ?)
-        self.poses = torch.FloatTensor(self.poses) # (N_images, 3, 4)
+        self.poses = torch.FloatTensor(np.stack(self.poses)) # (N_images, 3, 4)

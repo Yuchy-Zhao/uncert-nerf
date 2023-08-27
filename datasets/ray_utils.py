@@ -28,11 +28,11 @@ def get_ray_directions(H, W, K, device='cpu', random=False, return_uv=False, fla
     if random:
         directions = \
             torch.stack([(u-cx+torch.rand_like(u))/fx,
-                         (v-cy+torch.rand_like(v))/fy,
-                         torch.ones_like(u)], -1)
+                         -(v-cy+torch.rand_like(v))/fy,
+                         -torch.ones_like(u)], -1)
     else: # pass by the center
         directions = \
-            torch.stack([(u-cx+0.5)/fx, (v-cy+0.5)/fy, torch.ones_like(u)], -1)
+            torch.stack([(u-cx+0.5)/fx, -(v-cy+0.5)/fy, -torch.ones_like(u)], -1)
     if flatten:
         directions = directions.reshape(-1, 3)
         grid = grid.reshape(-1, 2)
@@ -66,7 +66,7 @@ def get_rays(directions, c2w):
         rays_d = rearrange(rays_d, 'n 1 c -> n c')
     # The origin of all rays is the camera origin in world coordinate
     rays_o = c2w[..., 3].expand_as(rays_d)
-
+    rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
     return rays_o, rays_d
 
 

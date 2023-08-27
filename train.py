@@ -5,7 +5,6 @@ import os
 import glob
 import imageio
 import numpy as np
-import cv2
 from einops import rearrange
 from collections import defaultdict
 
@@ -17,11 +16,12 @@ from datasets.ray_utils import axisangle_to_R, get_rays
 # models
 from kornia.utils.grid import create_meshgrid3d
 from models.networks import NeRF, Embedding
-from models.rendering import render
+from models.rendering import render_rays
 
 # optimizer, losses
 from apex.optimizers import FusedAdam
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim import Adam
+from torch.optim.lr_scheduler import CosineAnnealingLR, MultiStepLR
 from losses import NeRFLoss
 
 # metrics
@@ -38,17 +38,10 @@ from pytorch_lightning.callbacks import TQDMProgressBar, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.utilities.distributed import all_gather_ddp_if_available
 
-from utils import slim_ckpt, load_ckpt
+from utils import slim_ckpt, load_ckpt, depth2img
 
 import warnings; warnings.filterwarnings("ignore")
 
-
-def depth2img(depth):
-    depth = (depth-depth.min())/(depth.max()-depth.min())
-    depth_img = cv2.applyColorMap((depth*255).astype(np.uint8),
-                                  cv2.COLORMAP_TURBO)
-
-    return depth_img
 
 
 class NeRFSystem(LightningModule):
@@ -60,7 +53,9 @@ class NeRFSystem(LightningModule):
         self.update_interval = 16
 
         self.loss = NeRFLoss(lambda_opacity=self.hparams.opacity_loss_w, 
-                             lambda_distortion=self.hparams.distortion_loss_w)
+                             lambda_distortion=self.hparams.distortion_loss_w,
+                             lambda_uncertainty=self.hparams.uncertainty_loss)
+        
         self.train_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_psnr = PeakSignalNoiseRatio(data_range=1)
         self.val_ssim = StructuralSimilarityIndexMeasure(data_range=1)
@@ -93,23 +88,24 @@ class NeRFSystem(LightningModule):
             poses[..., 3] += self.dT[batch['img_idxs']]
 
         rays_o, rays_d = get_rays(directions, poses)
-
-        kwargs = {'test_time': split!='train',
-                  'random_bg': self.hparams.random_bg,
-                  'N_samples': self.hparams.N_samples,
-                  'use_disp' : self.hparams.use_disp,
-                  'perturb'  : self.hparams.perturb,
-                  'noise_std': self.hparams.noise_std,
-                  'N_importance' : self.hparams.N_importance,
-                  'chunk'    : self.hparams.chunk}
+        rays = torch.cat([rays_o, rays_d, 
+                        2.0*torch.ones_like(rays_o[:, :1]),
+                        6.0*torch.ones_like(rays_o[:, :1])],
+                        1) # (h*w, 8)
 
         results = defaultdict(list)
         for i in range(0, rays_o.shape[0], self.hparams.chunk):
             rendered_ray_chunks = \
-                render(self.models, self.embeddings, 
-                       rays_o[i:i+self.hparams.chunk], 
-                       rays_d[i:i+self.hparams.chunk], 
-                       **kwargs)
+                render_rays(self.models,
+                            self.embeddings,
+                            rays[i:i+self.hparams.chunk],
+                            self.hparams.N_samples,
+                            self.hparams.use_disp,
+                            self.hparams.perturb,
+                            self.hparams.noise_std,
+                            self.hparams.N_importance,
+                            self.hparams.chunk,
+                            white_back=True)
             for k, v in rendered_ray_chunks.items():
                 results[k] += [v]
 
@@ -125,14 +121,13 @@ class NeRFSystem(LightningModule):
         self.train_dataset = dataset(split=self.hparams.split, **kwargs)
         self.train_dataset.batch_size = self.hparams.batch_size
         self.train_dataset.ray_sampling_strategy = self.hparams.ray_sampling_strategy
-
+        self.register_buffer('directions', self.train_dataset.directions.to(self.device))
+        self.register_buffer('poses', self.train_dataset.poses.to(self.device))
+        
         self.test_dataset = dataset(split='test', **kwargs)
 
     def configure_optimizers(self):
         # define additional parameters
-        self.register_buffer('directions', self.train_dataset.directions.to(self.device))
-        self.register_buffer('poses', self.train_dataset.poses.to(self.device))
-
         if self.hparams.optimize_ext:
             N = len(self.train_dataset.poses)
             self.register_parameter('dR',
@@ -147,14 +142,21 @@ class NeRFSystem(LightningModule):
             if n not in ['dR', 'dT']: net_params += [p]
 
         opts = []
-        self.net_opt = FusedAdam(net_params, self.hparams.lr, eps=1e-15)
+        if hparams.optimizer == 'tinycudann':
+            self.net_opt = FusedAdam(net_params, self.hparams.lr)
+        elif hparams.optimizer == 'adam':
+            self.net_opt = Adam(net_params, lr=hparams.lr, weight_decay=hparams.weight_decay)
         opts += [self.net_opt]
         if self.hparams.optimize_ext:
             opts += [FusedAdam([self.dR, self.dT], 1e-6)] # learning rate is hard-coded
-        net_sch = CosineAnnealingLR(self.net_opt,
-                                    self.hparams.num_epochs,
-                                    self.hparams.lr/30)
 
+        if hparams.lr_scheduler == 'steplr':
+            net_sch = MultiStepLR(self.net_opt, milestones=hparams.decay_step, 
+                                gamma=hparams.decay_gamma)
+        elif hparams.lr_scheduler == 'cosine':
+            net_sch = CosineAnnealingLR(self.net_opt,
+                                        self.hparams.num_epochs,
+                                        self.hparams.lr/30)
         return opts, [net_sch]
 
     def train_dataloader(self):
@@ -177,13 +179,14 @@ class NeRFSystem(LightningModule):
         loss = sum(lo.mean() for lo in loss_d.values())
 
         with torch.no_grad():
-            self.train_psnr(results['rgb'], batch['rgb'])
+            self.train_psnr(results['rgb_fine'], batch['rgb'])
         self.log('lr', self.net_opt.param_groups[0]['lr'])
         self.log('train/loss', loss)
         self.log('train/loss_rgb', loss_d['rgb'].mean())
-        self.log('train/loss_opacity', loss_d['opacity'].mean())
         if self.hparams.use_depth:
             self.log('train/loss_depth', loss_d['depth'].mean())
+        if self.hparams.opacity_loss_w > 0:
+            self.log('train/loss_opacity', loss_d['opacity'].mean())
         if self.hparams.distortion_loss_w > 0:
             self.log('train/loss_distortion', loss_d['distortion'].mean())
         self.log('train/psnr', self.train_psnr, True)
@@ -202,12 +205,12 @@ class NeRFSystem(LightningModule):
 
         logs = {}
         # compute each metric per image
-        self.val_psnr(results['rgb'], rgb_gt)
+        self.val_psnr(results['rgb_fine'], rgb_gt)
         logs['psnr'] = self.val_psnr.compute()
         self.val_psnr.reset()
 
         w, h = self.train_dataset.img_wh
-        rgb_pred = rearrange(results['rgb'], '(h w) c -> 1 c h w', h=h)
+        rgb_pred = rearrange(results['rgb_fine'], '(h w) c -> 1 c h w', h=h)
         rgb_gt = rearrange(rgb_gt, '(h w) c -> 1 c h w', h=h)
         self.val_ssim(rgb_pred, rgb_gt)
         logs['ssim'] = self.val_ssim.compute()
@@ -220,14 +223,19 @@ class NeRFSystem(LightningModule):
 
         if not self.hparams.no_save_test: # save test image to disk
             idx = batch['img_idxs']
-            rgb_pred = rearrange(results['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
+            rgb_pred = rearrange(results['rgb_fine'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_pred = (rgb_pred*255).astype(np.uint8)
             rgb_gt = rearrange(batch['rgb'].cpu().numpy(), '(h w) c -> h w c', h=h)
             rgb_gt = (rgb_gt*255).astype(np.uint8)
-            depth = depth2img(rearrange(results['depth'].cpu().numpy(), '(h w) -> h w', h=h))
+            depth = depth2img(rearrange(results['depth_fine'].cpu().numpy(), '(h w) -> h w', h=h))
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_c.png'), rgb_pred)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_g.png'), rgb_gt)
             imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_d.png'), depth)
+            if self.hparams.uncertainty_loss:
+                uncert = depth2img(rearrange(results['uncert_fine'].cpu().numpy(), '(h w) -> h w', h=h))
+                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_u.png'), uncert)
+                mse = depth2img(rearrange(torch.abs(results['rgb_fine']-batch['rgb']).cpu().numpy().sum(-1), '(h w) -> h w', h=h))
+                imageio.imsave(os.path.join(self.val_dir, f'{idx:03d}_m.png'), mse)
         return logs
 
     def validation_epoch_end(self, outputs):
@@ -271,6 +279,7 @@ if __name__ == '__main__':
 
     trainer = Trainer(max_epochs=hparams.num_epochs,
                       check_val_every_n_epoch=hparams.num_epochs,
+                      # reload_dataloaders_every_n_epochs=1,
                       callbacks=callbacks,
                       logger=logger,
                       enable_model_summary=False,
@@ -290,13 +299,20 @@ if __name__ == '__main__':
         torch.save(ckpt_, f'runs/ckpts/{hparams.dataset_name}/{hparams.exp_name}/epoch={hparams.num_epochs-1}_slim.ckpt')
 
     if not hparams.no_save_test:
-        imgs = sorted(glob.glob(os.path.join(system.val_dir, '*.png')))
+        imgs = sorted(glob.glob(os.path.join(system.val_dir, '_c.png')))
         imageio.mimsave(os.path.join(system.val_dir, 'rgb.mp4'),
-                        [imageio.imread(img) for img in imgs[::3]],
+                        [imageio.imread(img) for img in imgs],
                         fps=10, macro_block_size=1)
+        depths = sorted(glob.glob(os.path.join(system.val_dir, '_d.png')))
         imageio.mimsave(os.path.join(system.val_dir, 'depth.mp4'),
-                        [imageio.imread(img) for img in imgs[1::3]],
+                        [imageio.imread(depth) for depth in depths],
                         fps=10, macro_block_size=1)
+        gts = sorted(glob.glob(os.path.join(system.val_dir, '_g.png')))
         imageio.mimsave(os.path.join(system.val_dir, 'GT.mp4'),
-                        [imageio.imread(img) for img in imgs[2::3]],
+                        [imageio.imread(gt) for gt in gts],
                         fps=10, macro_block_size=1)
+        if hparams.uncertainty_loss:
+            uncerts = sorted(glob.glob(os.path.join(system.val_dir, '_u.png')))
+            imageio.mimsave(os.path.join(system.val_dir, 'GT.mp4'),
+                            [imageio.imread(uncert) for uncert in uncerts],
+                            fps=10, macro_block_size=1)

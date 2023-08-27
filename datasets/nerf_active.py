@@ -10,7 +10,7 @@ from .color_utils import read_image
 from .base import BaseDataset
 
 
-class NeRFDataset(BaseDataset):
+class ActiveNeRFDataset(BaseDataset):
     def __init__(self, root_dir, split='train', downsample=1.0, **kwargs):
         super().__init__(root_dir, split, downsample)
 
@@ -42,6 +42,7 @@ class NeRFDataset(BaseDataset):
 
         with open(os.path.join(self.root_dir, f"transforms_{split}.json"), 'r') as f:
             frames = json.load(f)["frames"]
+            frames = [frames[idx] for idx in self.kwargs['idxs']]
 
         print(f'Loading {len(frames)} {split} images ...')
         for frame in tqdm(frames):

@@ -9,7 +9,7 @@
 
 
 
-export ROOT_DIR=/data/yunqi/3DVision/uncert-nerf/data/nerf
+# export ROOT_DIR=/data/yunqi/3DVision/uncert-nerf/data/nerf
 
 # CUDA_VISIBLE_DEVICES=1 python train.py \
 #     --root_dir $ROOT_DIR/lego --dataset_name nerf \
@@ -18,10 +18,36 @@ export ROOT_DIR=/data/yunqi/3DVision/uncert-nerf/data/nerf
 #     --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 \
 #     --exp_name nerf_norm 
 
-CUDA_VISIBLE_DEVICES=2 python train.py \
-    --root_dir $ROOT_DIR/lego --dataset_name nerf \
-    --num_epochs 20 --batch_size 8192 --downsample 0.5\
+# CUDA_VISIBLE_DEVICES=2 python train.py \
+#     --root_dir $ROOT_DIR/lego --dataset_name nerf \
+#     --num_epochs 20 --batch_size 8192 --downsample 0.5\
+#     --optimizer adam --lr 5e-4 \
+#     --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 \
+#     --uncertainty_loss \
+#     --exp_name nerf_uncert
+
+
+export ROOT_DIR=/data/yunqi/3DVision/uncert-nerf/data/Replica
+# CUDA_VISIBLE_DEVICES=1 python train.py \
+#     --root_dir $ROOT_DIR/office1 --dataset_name replica \
+#     --num_epochs 10 --batch_size 8192 --downsample 1\
+#     --optimizer adam --lr 5e-4 \
+#     --use_depth \
+#     --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 \
+#     --exp_name replica_deep 
+
+# CUDA_VISIBLE_DEVICES=2 python train.py \
+#     --root_dir $ROOT_DIR/office1 --dataset_name replica \
+#     --num_epochs 10 --batch_size 8192 --downsample 1\
+#     --optimizer adam --lr 5e-4 \
+#     --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 \
+#     --use_depth \
+#     --uncertainty_loss \
+#     --exp_name replica_uncert
+
+CUDA_VISIBLE_DEVICES=3 python train.py \
+    --root_dir $ROOT_DIR/office1 --dataset_name replica \
+    --num_epochs 10 --batch_size 8192 --downsample 1\
     --optimizer adam --lr 5e-4 \
     --lr_scheduler steplr --decay_step 2 4 8 --decay_gamma 0.5 \
-    --uncertainty_loss \
-    --exp_name nerf_uncert
+    --exp_name replica_norm

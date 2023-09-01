@@ -58,6 +58,8 @@ class NeRF(nn.Module):
         self.in_channels_dir = in_channels_dir
         self.skips = skips
 
+        self.xyz_encoder = Embedding(3, 10)
+
         # xyz encoding layers
         for i in range(D):
             if i == 0:

@@ -43,6 +43,14 @@ from utils import slim_ckpt, load_ckpt, depth2img
 import warnings; warnings.filterwarnings("ignore")
 
 
+def near_far_from_sphere(rays_o, rays_d):
+    a = torch.sum(rays_d**2, dim=-1, keepdim=True)
+    b = torch.sum(rays_o * rays_d, dim=-1, keepdim=True)
+    mid = -b / a
+    near = mid - 1.0
+    far = mid + 1.0
+    return near, far
+
 
 class NeRFSystem(LightningModule):
     def __init__(self, hparams):
@@ -88,10 +96,8 @@ class NeRFSystem(LightningModule):
             poses[..., 3] += self.dT[batch['img_idxs']]
 
         rays_o, rays_d = get_rays(directions, poses)
-        rays = torch.cat([rays_o, rays_d, 
-                        2.0*torch.ones_like(rays_o[:, :1]),
-                        6.0*torch.ones_like(rays_o[:, :1])],
-                        1) # (h*w, 8)
+        nears, fars = near_far_from_sphere(rays_o, rays_d)
+        rays = torch.cat([rays_o, rays_d, nears, fars], 1) # (h*w, 8)
 
         results = defaultdict(list)
         for i in range(0, rays_o.shape[0], self.hparams.chunk):
@@ -105,7 +111,7 @@ class NeRFSystem(LightningModule):
                             self.hparams.noise_std,
                             self.hparams.N_importance,
                             self.hparams.chunk,
-                            white_back=True)
+                            white_back=False)
             for k, v in rendered_ray_chunks.items():
                 results[k] += [v]
 

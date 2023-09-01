@@ -66,8 +66,9 @@ class NeRFLoss(nn.Module):
         
         # Loss of Depth
         if kwargs.get('use_depth', True):
-            d['depth'] = torch.abs(results['depth']-target['depth'])
-        
+            d['depth'] = torch.abs(results['depth_coarse']-target['depth'])
+            if 'depth_fine' in results:
+                d['depth'] += torch.abs(results['depth_fine']-target['depth'])
         # Opacity Loss
         if self.lambda_opacity > 0:
             o = results['opacity']+1e-10

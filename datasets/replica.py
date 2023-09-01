@@ -72,7 +72,7 @@ class ReplicaDataset(BaseDataset):
                 depth_path = os.path.join(self.root_dir, frame['depth_path'])
                 depth = read_depth(depth_path, self.img_wh)
                 depth *= meta['integer_depth_scale']
-                depth /= 2*self.scale
+                # depth /= 2*self.scale
                 self.depths += [depth]
             
             pose = np.array(frame['transform_matrix'])
@@ -85,3 +85,38 @@ class ReplicaDataset(BaseDataset):
         self.poses = torch.FloatTensor(self.poses) # (N_images, 3, 4)
         if kwargs.get('use_depth', True):
             self.depths = torch.FloatTensor(np.stack(self.depths)) # (N_images, hw, ?)
+
+        import open3d as o3d
+        # pcd = o3d.geometry.PointCloud()
+        pcd = o3d.io.read_point_cloud('/data/yunqi/3DVision/uncert-nerf/data/Replica/office1_mesh.ply')
+        poses = self.poses.numpy()
+        x, y, z = poses[:, 0, 3], poses[:, 1, 3], poses[:, 2, 3]
+        poses = np.array(list(zip(x, y, z)))
+        p_colors = np.ones(poses.shape) * 0.5
+
+        # with open(os.path.join(self.root_dir, "transforms.json"), 'r') as f:
+        #     meta = json.load(f)
+        # xyz_min = np.array(meta["aabb"][0])
+        # xyz_max = np.array(meta["aabb"][1])
+        # pcd.points.append([xyz_min[0], xyz_min[1], xyz_min[2]])
+        # pcd.points.append([xyz_min[0], xyz_min[1], xyz_max[2]])
+        # pcd.points.append([xyz_min[0], xyz_max[1], xyz_min[2]])
+        # pcd.points.append([xyz_max[0], xyz_min[1], xyz_min[2]])
+        # pcd.points.append([xyz_min[0], xyz_max[1], xyz_max[2]])
+        # pcd.points.append([xyz_max[0], xyz_min[1], xyz_max[2]])
+        # pcd.points.append([xyz_max[0], xyz_max[1], xyz_min[2]])
+        # pcd.points.append([xyz_max[0], xyz_max[1], xyz_max[2]])
+        points = (np.array(pcd.points) - self.shift) / self.scale / 2
+        points = np.concatenate([poses, points], axis=0)
+        colors = np.array(pcd.colors)
+        colors = np.concatenate([colors, p_colors], axis=0)
+        pcd.points = o3d.utility.Vector3dVector(points)
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        # http://www.open3d.org/docs/release/python_api/open3d.io.write_point_cloud.html#open3d.io.write_point_cloud
+        o3d.io.write_point_cloud("my_pts.ply", pcd, write_ascii=True)
+
+        # read ply file
+        pcd = o3d.io.read_point_cloud('my_pts.ply')
+
+        pass
